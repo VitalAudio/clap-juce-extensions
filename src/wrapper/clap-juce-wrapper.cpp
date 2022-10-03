@@ -997,8 +997,12 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                                  bool wasResized) override
     {
         juce::ignoreUnused(wasMoved);
-        if (wasResized && _host.canUseGui())
-            _host.guiRequestResize((uint32_t)component.getWidth(), (uint32_t)component.getHeight());
+        if (wasResized && _host.canUseGui()) {
+            float scale = 1.0f;
+            if (editor)
+                scale = editor->getDesktopScaleFactor();
+            _host.guiRequestResize((uint32_t)(component.getWidth() * scale), (uint32_t)(component.getHeight() * scale));
+        }
     }
 
     std::unique_ptr<juce::AudioProcessorEditor> editor;
@@ -1071,7 +1075,8 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         if (!editor->isResizable())
             return false;
 
-        editor->setSize(static_cast<int>(width), static_cast<int>(height));
+        float scale = editor->getDesktopScaleFactor();
+        editor->setBounds(0, 0, static_cast<int>(width / scale), static_cast<int>(height / scale));
         return true;
     }
 
@@ -1143,8 +1148,9 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         if (editor)
         {
             auto b = editor->getBounds();
-            *width = (uint32_t)b.getWidth();
-            *height = (uint32_t)b.getHeight();
+            float scale = editor->getDesktopScaleFactor();
+            *width = (uint32_t)(b.getWidth() * scale);
+            *height = (uint32_t)(b.getHeight() * scale);
             return true;
         }
         else
