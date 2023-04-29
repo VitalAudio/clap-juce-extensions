@@ -9,8 +9,8 @@
 # 4. Reload your CMAKe file and my-target_CLAP will be a buildable target
 
 # The INTERFACE targets to transmit CXX_STANDARD and POSITION INDEPENDENT
-# require at least CMAKE 3.21
-cmake_minimum_required (VERSION 3.21 FATAL_ERROR)
+# require at least CMAKE 3.20
+cmake_minimum_required (VERSION 3.20 FATAL_ERROR)
 
 get_directory_property(parent_dir PARENT_DIRECTORY)
 if ("${parent_dir}" STREQUAL "")
