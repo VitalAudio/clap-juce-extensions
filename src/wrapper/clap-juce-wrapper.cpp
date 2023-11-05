@@ -14,11 +14,20 @@
 #include <new>
 
 #define JUCE_GUI_BASICS_INCLUDE_XHEADERS 1
+#include <juce_core/system/juce_CompilerWarnings.h>
+#include <juce_core/system/juce_TargetPlatform.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_processors/format_types/juce_LegacyAudioParameter.cpp>
 
-JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wunused-parameter", "-Wsign-conversion", "-Wfloat-conversion")
+#if JUCE_VERSION >= 0x070006
+#include <juce_audio_plugin_client/detail/juce_IncludeSystemHeaders.h>
+#include <juce_audio_plugin_client/detail/juce_PluginUtilities.h>
+#include <juce_audio_plugin_client/detail/juce_VSTWindowUtilities.h>
+#endif
+
+JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wunused-parameter", "-Wsign-conversion", "-Wfloat-conversion",
+                                    "-Wfloat-equal")
 JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4100 4127 4244)
 // Sigh - X11.h eventually does a #define None 0L which doesn't work
 // with an enum in clap land being called None, so just undef it
@@ -38,7 +47,9 @@ JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 #include <clap-juce-extensions/clap-juce-extensions.h>
 
 #if JUCE_LINUX
-#if JUCE_VERSION > 0x060008
+#if JUCE_VERSION >= 0x070006
+#include <juce_audio_plugin_client/detail/juce_LinuxMessageThread.h>
+#elif JUCE_VERSION > 0x060008
 #include <juce_audio_plugin_client/utility/juce_LinuxMessageThread.h>
 #endif
 #endif
@@ -58,6 +69,13 @@ JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
 #if CLAP_SUPPORTS_CUSTOM_FACTORY
 extern void *clapJuceExtensionCustomFactory(const char *);
+#endif
+
+#if !JUCE_MAC
+template <typename T> using Point = juce::Point<T>;
+#if JUCE_VERSION < 0x070006
+using Component = juce::Component;
+#endif
 #endif
 
 /*
@@ -97,6 +115,7 @@ template <typename T, int qSize = 4096> class PushPopQ
     T dq[(size_t)qSize];
 };
 
+#if JUCE_VERSION < 0x070006
 /*
  * These functions are the JUCE VST2/3 NSView attachment functions. We compile them into
  * our clap dll by, on macos, also linking clap_juce_mac.mm
@@ -107,6 +126,7 @@ extern JUCE_API void initialiseMacVST();
 extern JUCE_API void *attachComponentToWindowRefVST(Component *, void *parentWindowOrView,
                                                     bool isNSView);
 } // namespace juce
+#endif
 
 JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4996) // allow strncpy
 
@@ -140,7 +160,7 @@ JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4996) // allow strncpy
 // #undef CLAP_CHECKING_LEVEL
 // #define CLAP_CHECKING_LEVEL Maximal
 
-/* Host context menus are only availble in JUCe 6.0.8 and later */
+/* Host context menus are only availble in JUCE 6.0.8 and later */
 #if JUCE_VERSION >= 0x060008
 class EditorContextMenu : public juce::HostProvidedContextMenu
 {
@@ -159,7 +179,7 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
         return builder.menuStack.front();
     }
 
-    void showNativeMenu(juce::Point<int> pos) const override
+    void showNativeMenu(Point<int> pos) const override
     {
         if (!host.contextMenuCanPopup(host.host()))
             return;
@@ -218,8 +238,7 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
             }
             else if (item_kind == CLAP_CONTEXT_MENU_ITEM_CHECK_ENTRY)
             {
-                const auto entry =
-                    static_cast<const clap_context_menu_check_entry *>(item_data);
+                const auto entry = static_cast<const clap_context_menu_check_entry *>(item_data);
 
                 juce::PopupMenu::Item item;
                 item.itemID = ++menuIDCounter;
@@ -258,8 +277,7 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
                 menuStack.pop_back();
 
                 // add the sub-menu to the menu one level up
-                menuStack.back().addSubMenu(currentSubMenuLabel, subMenu,
-                                            currentSubMenuEnabled);
+                menuStack.back().addSubMenu(currentSubMenuLabel, subMenu, currentSubMenuEnabled);
             }
             else if (item_kind == CLAP_CONTEXT_MENU_ITEM_TITLE)
             {
@@ -273,7 +291,10 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
         }
 
         // Currently, JUCE supports all the item kinds that CLAP supports!
-        bool supports(clap_context_menu_item_kind_t /*item_kind*/) const noexcept override { return true; }
+        bool supports(clap_context_menu_item_kind_t /*item_kind*/) const noexcept override
+        {
+            return true;
+        }
     };
     MenuBuilder builder{host, &menuTarget};
 };
@@ -413,6 +434,9 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                         _host.remoteControlsSuggestPage(pageID);
                 });
             };
+            processorAsClapExtensions->extensionGet = [this](const char *name) {
+                return _host.host()->get_extension(_host.host(), name);
+            };
         }
 
         const bool forceLegacyParamIDs = false;
@@ -447,8 +471,6 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
     ~ClapJuceWrapper() override
     {
-        processor->editorBeingDeleted(editor.get());
-
 #if JUCE_LINUX
         if (_host.canUseTimerSupport())
         {
@@ -479,7 +501,11 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         juce::ScopedJuceInitialiser_GUI libraryInitialiser;
         const juce::MessageManagerLock mmLock;
 
-#if JUCE_VERSION > 0x060008
+#if JUCE_VERSION >= 0x070006
+        while (juce::detail::dispatchNextMessageOnSystemQueue(true))
+        {
+        }
+#elif JUCE_VERSION > 0x060008
         while (juce::dispatchNextMessageOnSystemQueue(true))
         {
         }
@@ -1216,8 +1242,10 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
     {
         newValue = getNormalisedParameterValue(param, newValue);
 
+        JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wfloat-equal")
         if (param.processorParam->getValue() == newValue)
             return;
+        JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
         param.processorParam->setValue(newValue);
 
@@ -1574,6 +1602,14 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                                 (int)midiEvent->header.time - sampleOffset);
         }
         break;
+        case CLAP_EVENT_MIDI_SYSEX:
+        {
+            auto midiSysexEvent = reinterpret_cast<const clap_event_midi_sysex *>(event);
+            midiBuffer.addEvent(juce::MidiMessage(midiSysexEvent->buffer, (int)midiSysexEvent->size,
+                                                  midiSysexEvent->header.time),
+                                (int)midiSysexEvent->header.time - sampleOffset);
+        }
+        break;
         case CLAP_EVENT_TRANSPORT:
         {
             // handle this case
@@ -1650,23 +1686,255 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         }
     }
 
-    void componentMovedOrResized(juce::Component &component, bool wasMoved,
-                                 bool wasResized) override
+    // START GUI CODE
+    bool implementsGui() const noexcept override { return processor->hasEditor(); }
+    bool guiIsApiSupported(const char *api, bool isFloating) noexcept override
     {
-        juce::ignoreUnused(wasMoved);
-        if (wasResized && _host.canUseGui())
-            _host.guiRequestResize((uint32_t)component.getWidth(), (uint32_t)component.getHeight());
+        if (isFloating)
+            return false;
+
+        if (strcmp(api, CLAP_WINDOW_API_WIN32) == 0 || strcmp(api, CLAP_WINDOW_API_COCOA) == 0 ||
+            strcmp(api, CLAP_WINDOW_API_X11) == 0)
+            return true;
+
+        return false;
     }
 
-    std::unique_ptr<juce::AudioProcessorEditor> editor;
+    struct EditorWrapperComponent : Component
+    {
+        using HostType = clap::helpers::HostProxy<
+            clap::helpers::MisbehaviourHandler::CLAP_MISBEHAVIOUR_HANDLER_LEVEL,
+            clap::helpers::CheckingLevel::CLAP_CHECKING_LEVEL>;
+        EditorWrapperComponent(HostType &_host, ClapJuceWrapper &_clapWrapper)
+            : host(_host), clapWrapper(_clapWrapper)
+        {
+            setOpaque(true);
+            setBroughtToFrontOnMouseClick(true);
+        }
+
+        ~EditorWrapperComponent() override
+        {
+            if (editor != nullptr)
+            {
+                juce::PopupMenu::dismissAllActiveMenus();
+                editor->processor.editorBeingDeleted(editor.get());
+            }
+        }
+
+        void createEditor(juce::AudioProcessor &plugin)
+        {
+            editor.reset(plugin.createEditorIfNeeded());
+
+            if (editor != nullptr)
+            {
 #if JUCE_VERSION >= 0x060008
-    std::unique_ptr<juce::AudioProcessorEditorHostContext> editorHostContext;
+                editorHostContext =
+                    std::make_unique<EditorHostContext>(host, clapWrapper.clapIDByParamPtr);
+                editor->setHostContext(editorHostContext.get());
 #endif
-    bool implementsGui() const noexcept override { return processor->hasEditor(); }
+#if !JUCE_MAC
+                editor->setScaleFactor(clapWrapper.guiScaleFactor);
+#endif
+
+                addAndMakeVisible(editor.get());
+                editor->setTopLeftPosition(0, 0);
+
+                lastBounds = getSizeToContainChild();
+
+                {
+                    const juce::ScopedValueSetter<bool> resizingParentSetter{resizingParent, true};
+                    setBounds(lastBounds);
+                }
+            }
+            else
+            {
+                // if hasEditor() returns true then createEditorIfNeeded has to return a valid
+                // editor
+                jassertfalse;
+            }
+        }
+
+        juce::Rectangle<int> getSizeToContainChild()
+        {
+            if (editor != nullptr)
+                return getLocalArea(editor.get(), editor->getLocalBounds());
+
+            return {};
+        }
+
+        juce::Rectangle<int> convertToHostBounds(juce::Rectangle<int> pluginRect)
+        {
+            const auto desktopScale = clapWrapper.guiScaleFactor;
+            if (juce::isWithin(desktopScale, 1.0f, 1.0e-3f))
+                return pluginRect;
+
+            return {juce::roundToInt((float)pluginRect.getX() * desktopScale),
+                    juce::roundToInt((float)pluginRect.getY() * desktopScale),
+                    juce::roundToInt((float)pluginRect.getWidth() * desktopScale),
+                    juce::roundToInt((float)pluginRect.getHeight() * desktopScale)};
+        }
+
+        void resizeHostWindow()
+        {
+            if (editor != nullptr)
+            {
+                auto editorBounds = getSizeToContainChild().withPosition(0, 0);
+                {
+                    const juce::ScopedValueSetter<bool> resizingParentSetter(resizingParent, true);
+                    host.guiRequestResize((uint32_t)editorBounds.getWidth(),
+                                          (uint32_t)editorBounds.getHeight());
+                }
+
+                setBounds(editorBounds.withPosition(0, 0));
+            }
+        }
+
+        void setEditorScaleFactor(float scale)
+        {
+            if (editor != nullptr)
+            {
+                auto prevEditorBounds = editor->getLocalArea(this, lastBounds);
+
+                {
+                    const juce::ScopedValueSetter<bool> resizingChildSetter{resizingChild, true};
+
+                    editor->setScaleFactor(scale);
+                    editor->setBounds(prevEditorBounds.withPosition(0, 0));
+                }
+
+                lastBounds = getSizeToContainChild();
+
+                resizeHostWindow();
+                repaint();
+            }
+        }
+
+        void paint(juce::Graphics &g) override { g.fillAll(juce::Colours::red); }
+        void resized() override
+        {
+            if (editor != nullptr)
+            {
+                if (!resizingParent)
+                {
+                    auto newBounds = getLocalBounds();
+
+                    {
+                        const juce::ScopedValueSetter<bool> resizingChildSetter{resizingChild,
+                                                                                true};
+                        editor->setBounds(editor->getLocalArea(this, newBounds).withPosition(0, 0));
+                    }
+
+                    lastBounds = newBounds;
+                }
+            }
+        }
+
+        void childBoundsChanged(Component *) override
+        {
+            if (resizingChild)
+                return;
+
+            auto newBounds = getSizeToContainChild();
+
+            if (newBounds != lastBounds)
+            {
+                resizeHostWindow();
+
+                repaint();
+
+                lastBounds = newBounds;
+            }
+        }
+
+        HostType &host;
+        ClapJuceWrapper &clapWrapper;
+        std::unique_ptr<juce::AudioProcessorEditor> editor;
+#if JUCE_VERSION >= 0x060008
+        std::unique_ptr<juce::AudioProcessorEditorHostContext> editorHostContext;
+#endif
+
+      private:
+        juce::Rectangle<int> lastBounds;
+        bool resizingChild = false, resizingParent = false;
+        JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(EditorWrapperComponent)
+    };
+    std::unique_ptr<EditorWrapperComponent> editorWrapper;
+
+    bool guiParentAttached{false};
+    float guiScaleFactor = 1.0f;
+    bool guiCreate(const char *api, bool isFloating) noexcept override
+    {
+        juce::ignoreUnused(api);
+
+        // Should never happen
+        if (isFloating)
+            return false;
+
+        const juce::MessageManagerLock mmLock;
+
+        if (editorWrapper == nullptr)
+            editorWrapper = std::make_unique<EditorWrapperComponent>(_host, *this);
+
+        editorWrapper->createEditor(*processor);
+        return editorWrapper->editor != nullptr;
+    }
+
+    void guiDestroy() noexcept override
+    {
+        editorWrapper.reset(nullptr);
+        guiParentAttached = false;
+    }
+
+    bool guiSetParent(const clap_window *window) noexcept override
+    {
+        guiParentAttached = true;
+#if JUCE_MAC
+        return guiCocoaAttach(window->cocoa);
+#elif JUCE_LINUX
+        return guiX11Attach(nullptr, window->x11);
+#elif JUCE_WINDOWS
+        return guiWin32Attach(window->win32);
+#else
+        guiParentAttached = false;
+        return false;
+#endif
+    }
+
+    // Show doesn't really exist in JUCE per se. If there's an editor and its attached
+    // we are good.
+    bool guiShow() noexcept override
+    {
+#if JUCE_MAC || JUCE_LINUX || JUCE_WINDOWS
+        if (editorWrapper != nullptr && editorWrapper->editor != nullptr)
+        {
+            return guiParentAttached;
+        }
+#endif
+        return false;
+    }
+
     bool guiCanResize() const noexcept override
     {
-        if (editor)
-            return editor->isResizable();
+        if (editorWrapper != nullptr && editorWrapper->editor != nullptr)
+            return editorWrapper->editor->isResizable();
+        return true;
+    }
+
+    bool guiSetScale(double scale) noexcept override
+    {
+        if (scale > 50)
+        {
+            // this is almost definitely a units error
+            scale *= 0.01;
+        }
+        guiScaleFactor = static_cast<float>(scale);
+
+        if (editorWrapper != nullptr)
+        {
+            editorWrapper->setEditorScaleFactor(guiScaleFactor);
+            return true;
+        }
+
         return true;
     }
 
@@ -1677,21 +1945,25 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
      */
     bool guiAdjustSize(uint32_t *w, uint32_t *h) noexcept override
     {
-        if (!editor)
+        if (editorWrapper == nullptr || editorWrapper->editor == nullptr)
             return false;
 
-        if (!editor->isResizable())
+        if (!editorWrapper->editor->isResizable())
             return false;
 
-        auto cst = editor->getConstrainer();
+        auto cst = editorWrapper->editor->getConstrainer();
 
         if (!cst)
-            return true; // we have no constraints. Whaever is fine!
+            return true; // we have no constraints. Whatever is fine!
 
-        auto minW = (uint32_t)cst->getMinimumWidth();
-        auto maxW = (uint32_t)cst->getMaximumWidth();
-        auto minH = (uint32_t)cst->getMinimumHeight();
-        auto maxH = (uint32_t)cst->getMaximumHeight();
+        const auto minBounds =
+            editorWrapper->convertToHostBounds({cst->getMinimumWidth(), cst->getMinimumHeight()});
+        const auto maxBounds =
+            editorWrapper->convertToHostBounds({cst->getMaximumWidth(), cst->getMaximumHeight()});
+        auto minW = (uint32_t)minBounds.getWidth();
+        auto maxW = (uint32_t)maxBounds.getWidth();
+        auto minH = (uint32_t)minBounds.getHeight();
+        auto maxH = (uint32_t)maxBounds.getHeight();
 
         // There is no std::clamp in c++14
         auto width = juce::jlimit(minW, maxW, *w);
@@ -1699,7 +1971,7 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
         auto aspectRatio = (float)cst->getFixedAspectRatio();
 
-        if (aspectRatio != 0.0f)
+        if (aspectRatio > 0.0f)
         {
             /*
              * This is obviously an unsatisfactory algorithm, but we wanted to have
@@ -1725,104 +1997,24 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
     bool guiSetSize(uint32_t width, uint32_t height) noexcept override
     {
-        if (!editor)
+        //        std::cout << "GUI SET SIZE " << width << " " << height << std::endl;
+        if (editorWrapper == nullptr || editorWrapper->editor == nullptr)
             return false;
 
-        if (!editor->isResizable())
+        if (!editorWrapper->editor->isResizable())
             return false;
 
-        editor->setSize(static_cast<int>(width), static_cast<int>(height));
+        const auto b = juce::Rectangle{(int)width, (int)height};
+        editorWrapper->setSize(b.getWidth(), b.getHeight());
         return true;
-    }
-
-    bool guiIsApiSupported(const char *api, bool isFloating) noexcept override
-    {
-        if (isFloating)
-            return false;
-
-        if (strcmp(api, CLAP_WINDOW_API_WIN32) == 0 || strcmp(api, CLAP_WINDOW_API_COCOA) == 0 ||
-            strcmp(api, CLAP_WINDOW_API_X11) == 0)
-            return true;
-
-        return false;
-    }
-
-    bool guiParentAttached{false};
-    bool guiCreate(const char *api, bool isFloating) noexcept override
-    {
-        juce::ignoreUnused(api);
-
-        // Should never happen
-        if (isFloating)
-            return false;
-
-        const juce::MessageManagerLock mmLock;
-        editor.reset(processor->createEditorIfNeeded());
-
-        if (editor == nullptr)
-            return false;
-
-        if (editor != nullptr)
-        {
-#if JUCE_VERSION >= 0x060008
-            editorHostContext = std::make_unique<EditorHostContext>(_host, clapIDByParamPtr);
-            editor->setHostContext(editorHostContext.get());
-#endif
-            editor->addComponentListener(this);
-        }
-        else
-        {
-            // if hasEditor() returns true then createEditorIfNeeded has to return a valid editor
-            jassertfalse;
-        }
-
-        return editor != nullptr;
-    }
-
-    void guiDestroy() noexcept override
-    {
-#if JUCE_VERSION >= 0x060008
-        editorHostContext.reset();
-#endif
-        processor->editorBeingDeleted(editor.get());
-        guiParentAttached = false;
-        editor.reset(nullptr);
-    }
-
-    bool guiSetParent(const clap_window *window) noexcept override
-    {
-        guiParentAttached = true;
-#if JUCE_MAC
-        return guiCocoaAttach(window->cocoa);
-#elif JUCE_LINUX
-        return guiX11Attach(nullptr, window->x11);
-#elif JUCE_WINDOWS
-        return guiWin32Attach(window->win32);
-#else
-        guiParentAttached = false;
-        return false;
-#endif
-    }
-
-    // Show doesn't really exist in JUCE per se. If there's an editor and its attached
-    // we are good.
-    bool guiShow() noexcept override
-    {
-#if JUCE_MAC || JUCE_LINUX || JUCE_WINDOWS
-        if (editor)
-        {
-            return guiParentAttached;
-        }
-#endif
-        return false;
     }
 
     bool guiGetSize(uint32_t *width, uint32_t *height) noexcept override
     {
         const juce::MessageManagerLock mmLock;
-        if (editor)
+        if (editorWrapper != nullptr && editorWrapper->editor != nullptr)
         {
-            auto b = editor->getBounds();
+            const auto b = editorWrapper->getBounds();
             *width = (uint32_t)b.getWidth();
             *height = (uint32_t)b.getHeight();
             return true;
@@ -1834,6 +2026,7 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         }
         return false;
     }
+    // END GUI CODE
 
   protected:
     juce::CriticalSection stateInformationLock;
@@ -1907,8 +2100,15 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 #if JUCE_MAC
     bool guiCocoaAttach(void *nsView) noexcept
     {
+#if JUCE_VERSION < 0x070006
         juce::initialiseMacVST();
-        auto hostWindow = juce::attachComponentToWindowRefVST(editor.get(), nsView, true);
+        auto hostWindow = juce::attachComponentToWindowRefVST(editorWrapper.get(), nsView, true);
+#else
+        const auto desktopFlags =
+            juce::detail::PluginUtilities::getDesktopFlags(editorWrapper->editor.get());
+        auto hostWindow = juce::detail::VSTWindowUtilities::attachComponentToWindowRefVST(
+            editorWrapper.get(), desktopFlags, nsView);
+#endif
         juce::ignoreUnused(hostWindow);
         return true;
     }
@@ -1919,24 +2119,23 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
     {
         juce::ignoreUnused(displayName);
         const juce::MessageManagerLock mmLock;
-        editor->setVisible(false);
-        editor->addToDesktop(0, (void *)window);
+        editorWrapper->setVisible(false);
+        editorWrapper->addToDesktop(0, (void *)window);
         auto *display = juce::XWindowSystem::getInstance()->getDisplay();
-        juce::X11Symbols::getInstance()->xReparentWindow(display, (Window)editor->getWindowHandle(),
-                                                         window, 0, 0);
-        editor->setVisible(true);
+        juce::X11Symbols::getInstance()->xReparentWindow(
+            display, (Window)editorWrapper->getWindowHandle(), window, 0, 0);
+        editorWrapper->setVisible(true);
         return true;
     }
 #endif
 
 #if JUCE_WINDOWS
-    bool guiWin32Attach(clap_hwnd window) noexcept
+    bool guiWin32Attach(clap_hwnd window) const noexcept
     {
-        editor->setVisible(false);
-        editor->setOpaque(true);
-        editor->setTopLeftPosition(0, 0);
-        editor->addToDesktop(0, (void *)window);
-        editor->setVisible(true);
+        editorWrapper->setVisible(false);
+        editorWrapper->setTopLeftPosition(0, 0);
+        editorWrapper->addToDesktop(0, (void *)window);
+        editorWrapper->setVisible(true);
         return true;
     }
 #endif
@@ -2006,8 +2205,8 @@ static const clap_plugin_descriptor *clap_get_plugin_descriptor(const struct cla
     return &ClapJuceWrapper::desc;
 }
 
-static const clap_plugin *clap_create_plugin(const struct clap_plugin_factory *,
-                                             const clap_host *host, const char *plugin_id)
+const clap_plugin *clap_create_plugin(const struct clap_plugin_factory *, const clap_host *host,
+                                      const char *plugin_id)
 {
     juce::ScopedJuceInitialiser_GUI libraryInitialiser;
 
@@ -2022,8 +2221,10 @@ static const clap_plugin *clap_create_plugin(const struct clap_plugin_factory *,
     clap_juce_extensions::clap_properties::clap_version_major = CLAP_VERSION_MAJOR;
     clap_juce_extensions::clap_properties::clap_version_minor = CLAP_VERSION_MINOR;
     clap_juce_extensions::clap_properties::clap_version_revision = CLAP_VERSION_REVISION;
+    clap_juce_extensions::clap_juce_audio_processor_capabilities::clapHostStatic = host;
     auto *const pluginInstance = ::createPluginFilter();
     clap_juce_extensions::clap_properties::building_clap = false;
+    clap_juce_extensions::clap_juce_audio_processor_capabilities::clapHostStatic = nullptr;
     auto *wrapper = new ClapJuceWrapper(host, pluginInstance);
     return wrapper->clapPlugin();
 }
@@ -2055,7 +2256,11 @@ extern "C"
 #if JUCE_LINUX
 #pragma GCC diagnostic ignored "-Wattributes"
 #endif
-    const CLAP_EXPORT struct clap_plugin_entry clap_entry = {CLAP_VERSION, ClapAdapter::clap_init,
-                                                             ClapAdapter::clap_deinit,
-                                                             ClapAdapter::clap_get_factory};
+
+#if JUCE_MINGW
+    extern
+#endif
+        const CLAP_EXPORT struct clap_plugin_entry clap_entry = {
+            CLAP_VERSION, ClapAdapter::clap_init, ClapAdapter::clap_deinit,
+            ClapAdapter::clap_get_factory};
 }
