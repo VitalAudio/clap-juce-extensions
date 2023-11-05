@@ -2004,7 +2004,7 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         if (!editorWrapper->editor->isResizable())
             return false;
 
-        const auto b = juce::Rectangle{(int)width, (int)height};
+        const auto b = juce::Rectangle<int>{(int)width, (int)height};
         editorWrapper->setSize(b.getWidth(), b.getHeight());
         return true;
     }
