@@ -1721,6 +1721,8 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             }
         }
 
+        float getDesktopScaleFactor() const override { return editor->getDesktopScaleFactor(); }
+
         void createEditor(juce::AudioProcessor &plugin)
         {
             editor.reset(plugin.createEditorIfNeeded());
@@ -1780,9 +1782,12 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             {
                 auto editorBounds = getSizeToContainChild().withPosition(0, 0);
                 {
+                    float scale = 1.0f;
+                    if (editor)
+                        scale = editor->getDesktopScaleFactor();
                     const juce::ScopedValueSetter<bool> resizingParentSetter(resizingParent, true);
-                    host.guiRequestResize((uint32_t)editorBounds.getWidth(),
-                                          (uint32_t)editorBounds.getHeight());
+                    host.guiRequestResize((uint32_t)editorBounds.getWidth() * scale,
+                                          (uint32_t)editorBounds.getHeight() * scale);
                 }
 
                 setBounds(editorBounds.withPosition(0, 0));
@@ -2005,7 +2010,8 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             return false;
 
         const auto b = juce::Rectangle<int>{(int)width, (int)height};
-        editorWrapper->setSize(b.getWidth(), b.getHeight());
+        float scale = editorWrapper->getDesktopScaleFactor();
+        editorWrapper->setSize(static_cast<int>(width / scale), static_cast<int>(height / scale));
         return true;
     }
 
@@ -2015,8 +2021,9 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         if (editorWrapper != nullptr && editorWrapper->editor != nullptr)
         {
             const auto b = editorWrapper->getBounds();
-            *width = (uint32_t)b.getWidth();
-            *height = (uint32_t)b.getHeight();
+            float scale = editorWrapper->getDesktopScaleFactor();
+            *width = (uint32_t)(b.getWidth() * scale);
+            *height = (uint32_t)(b.getHeight() * scale);
             return true;
         }
         else
