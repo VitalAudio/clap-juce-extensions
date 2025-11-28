@@ -1,4 +1,4 @@
-# JUCE6 and 7 Unofficial CLAP Plugin Support
+# JUCE6, 7 and 8 Unofficial CLAP Plugin Support
 
 This is a set of code which, combined with a JUCE 6 or JUCE 7 plugin project, allows you to build a CLAP plugin. It
 is licensed under the MIT license, and can be used for both open and closed source projects.
@@ -33,7 +33,13 @@ somewhere in your dev environment, setting a few CMake variables, and adding a c
 The instructions are as follows:
 
 1. Add `https://github.com/free-audio/clap-juce-extensions.git` as a submodule of your project, or otherwise make the
-   source available to your cmake (CPM, side by side check out in CI, etc...).
+   source available to your cmake (CPM, side by side check out in CI, etc...). For example:
+
+```git
+git submodule add -b main https://github.com/free-audio/clap-juce-extensions.git libs/clap-juce-extensions
+git submodule update --init --recursive # important, this will grab clap and clap-helpers
+```
+   
 2. Load the `clap-juce-extension` in your CMake after you have loaded JUCE. For instance, you could do
 
 ```cmake
@@ -72,6 +78,9 @@ set(CMAKE_CXX_STANDARD 17)
 
 # Make sure to set the same MacOS deployment target as you have set in the Projucer
 set(CMAKE_OSX_DEPLOYMENT_TARGET "10.12" CACHE STRING "Minimum OS X deployment target")
+
+# If you want to build a universal binary on Mac by default, you may want to include this line
+# set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64")
 
 # If the Projucer is using "static runtime" for Visual Studio:
 # set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "Runtime")

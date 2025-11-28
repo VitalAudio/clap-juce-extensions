@@ -3,6 +3,7 @@
  *
  * Released under the MIT License, as described in LICENSE.md in this repository
  */
+
 #if _WIN32
 #define _CRT_SECURE_NO_WARNINGS 1
 #endif
@@ -41,6 +42,11 @@ JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4100 4127 4244)
 #include <clap/helpers/host-proxy.hxx>
 #include <clap/helpers/plugin.hh>
 #include <clap/helpers/plugin.hxx>
+
+#if CLAP_VERSION_LT(1, 2, 0)
+static_assert(false, "CLAP juce wrapper requires at least clap 1.2.0");
+#endif
+
 JUCE_END_IGNORE_WARNINGS_MSVC
 JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
@@ -48,7 +54,10 @@ JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 
 #if JUCE_LINUX
 #if JUCE_VERSION >= 0x070006
+#include <vector>
+#include <juce_events/native/juce_EventLoopInternal_linux.h>
 #include <juce_audio_plugin_client/detail/juce_LinuxMessageThread.h>
+#define HAS_LINUX_FD 1
 #elif JUCE_VERSION > 0x060008
 #include <juce_audio_plugin_client/utility/juce_LinuxMessageThread.h>
 #endif
@@ -68,7 +77,7 @@ JUCE_END_IGNORE_WARNINGS_GCC_LIKE
     }
 
 #if CLAP_SUPPORTS_CUSTOM_FACTORY
-extern void *clapJuceExtensionCustomFactory(const char *);
+extern const void *JUCE_CALLTYPE clapJuceExtensionCustomFactory(const char *);
 #endif
 
 #if !JUCE_MAC
@@ -128,7 +137,13 @@ extern JUCE_API void *attachComponentToWindowRefVST(Component *, void *parentWin
 } // namespace juce
 #endif
 
-JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4996) // allow strncpy
+// Some compilers generate warnings when we use `strncpy` instead
+// of `strncpy_s`. However, other compilers don't support `strncpy_s`.
+// So for now, we ignore those warnings, but once all the compilers
+// that we care about support `strncpy_s`, we should remove these
+// warnings guards and use `strncpy_s`.
+JUCE_BEGIN_IGNORE_WARNINGS_GCC_LIKE("-Wdeprecated-declarations")
+JUCE_BEGIN_IGNORE_WARNINGS_MSVC(4996)
 
 #if !defined(CLAP_MISBEHAVIOUR_HANDLER_LEVEL)
 #define CLAP_MISBEHAVIOUR_HANDLER_LEVEL "Ignore"
@@ -173,7 +188,7 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
 
     juce::PopupMenu getEquivalentPopupMenu() const override
     {
-        host.contextMenuPopulate(host.host(), &menuTarget, builder.builder());
+        host.contextMenuPopulate(&menuTarget, builder.builder());
 
         jassert(builder.menuStack.size() == 1); // one of the sub-menus has not been closed?
         return builder.menuStack.front();
@@ -181,11 +196,11 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
 
     void showNativeMenu(Point<int> pos) const override
     {
-        if (!host.contextMenuCanPopup(host.host()))
+        if (!host.contextMenuCanPopup())
             return;
 
         // TODO: figure out screen index?
-        host.contextMenuPopup(host.host(), &menuTarget, 0, pos.x, pos.y);
+        host.contextMenuPopup(&menuTarget, 0, pos.x, pos.y);
     }
 
     clap_context_menu_target menuTarget{};
@@ -229,10 +244,8 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
                 item.itemID = ++menuIDCounter;
                 item.text = juce::CharPointer_UTF8(entry->label);
                 item.isEnabled = entry->is_enabled;
-                item.action = [&host = this->host, target = *this->menuTarget,
-                               id = entry->action_id] {
-                    host.contextMenuPerform(host.host(), &target, id);
-                };
+                item.action = [&hostRef = this->host, target = *this->menuTarget,
+                               id = entry->action_id] { hostRef.contextMenuPerform(&target, id); };
 
                 currentMenu.addItem(item);
             }
@@ -245,10 +258,8 @@ class EditorContextMenu : public juce::HostProvidedContextMenu
                 item.text = juce::CharPointer_UTF8(entry->label);
                 item.isEnabled = entry->is_enabled;
                 item.isTicked = entry->is_checked;
-                item.action = [&host = this->host, target = *this->menuTarget,
-                               id = entry->action_id] {
-                    host.contextMenuPerform(host.host(), &target, id);
-                };
+                item.action = [&hostRef = this->host, target = *this->menuTarget,
+                               id = entry->action_id] { hostRef.contextMenuPerform(&target, id); };
 
                 currentMenu.addItem(item);
             }
@@ -361,6 +372,12 @@ class EditorHostContext : public juce::AudioProcessorEditorHostContext
 };
 #endif // JUCE_VERSION >= 0x060008
 
+/** Converts a clap_color to a juce::Colour */
+static juce::Colour clapColourToJUCEColour(const clap_color &clapColour)
+{
+    return {clapColour.red, clapColour.green, clapColour.blue, clapColour.alpha};
+}
+
 /*
  * The ClapJuceWrapper is a class which immplements a collection
  * of CLAP and JUCE APIs
@@ -371,6 +388,9 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                         public juce::AudioProcessorListener,
                         public juce::AudioPlayHead,
                         public juce::AudioProcessorParameter::Listener,
+#if HAS_LINUX_FD
+                        public juce::LinuxEventLoopInternal::Listener,
+#endif
                         public juce::ComponentListener
 {
   public:
@@ -434,6 +454,18 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                         _host.remoteControlsSuggestPage(pageID);
                 });
             };
+            processorAsClapExtensions->onPresetLoadError =
+                [this](uint32_t location_kind, const char *location, const char *load_key,
+                       int32_t os_error, const juce::String &msg) {
+                    if (_host.canUsePresetLoad())
+                        _host.presetLoadOnError(location_kind, location, load_key, os_error,
+                                                msg.toRawUTF8());
+                };
+            processorAsClapExtensions->onPresetLoaded =
+                [this](uint32_t location_kind, const char *location, const char *load_key) {
+                    if (_host.canUsePresetLoad())
+                        _host.presetLoadLoaded(location_kind, location, load_key);
+                };
             processorAsClapExtensions->extensionGet = [this](const char *name) {
                 return _host.host()->get_extension(_host.host(), name);
             };
@@ -467,6 +499,10 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                 dynamic_cast<clap_juce_extensions::clap_juce_parameter_capabilities *>(juceParam)};
             clapIDByParamPtr[juceParam] = clapID;
         }
+
+#if HAS_LINUX_FD
+        juce::LinuxEventLoopInternal::registerLinuxEventLoopListener(*this);
+#endif
     }
 
     ~ClapJuceWrapper() override
@@ -476,6 +512,11 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         {
             _host.timerSupportUnregister(idleTimer);
         }
+
+#if HAS_LINUX_FD
+        juce::LinuxEventLoopInternal::deregisterLinuxEventLoopListener(*this);
+        unregisterExtantFDs();
+#endif
 #endif
     }
 
@@ -491,6 +532,8 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
         return true;
     }
+
+    void reset() noexcept override { processor->reset(); }
 
   public:
     bool implementsTimerSupport() const noexcept override { return true; }
@@ -515,6 +558,43 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 #endif
 #endif
     }
+
+#if HAS_LINUX_FD 
+    std::vector<int> registeredFDs;
+    void fdCallbacksChanged() override
+    {
+        unregisterExtantFDs();
+        registeredFDs = juce::LinuxEventLoopInternal::getRegisteredFds();
+        if (_host.canUsePosixFdSupport())
+        {
+            for (auto &fd : registeredFDs)
+            {
+                _host.posixFdSupportRegister(fd, CLAP_POSIX_FD_READ | CLAP_POSIX_FD_WRITE | CLAP_POSIX_FD_ERROR);
+            }
+        }
+    }
+    void unregisterExtantFDs()
+    {
+        if (_host.canUsePosixFdSupport())
+        {
+            for (auto &fd : registeredFDs)
+            {
+                _host.posixFdSupportUnregister(fd);
+            }
+        }
+        registeredFDs.clear();
+    }
+
+    bool implementsPosixFdSupport() const noexcept override { return true; }
+    void onPosixFd(int fd, clap_posix_fd_flags_t /* flags */) noexcept override
+    {
+        juce::ScopedJuceInitialiser_GUI libraryInitialiser;
+        const juce::MessageManagerLock mmLock;
+
+        juce::LinuxEventLoopInternal::invokeEventLoopCallbackForFd(fd);
+    }
+
+#endif
 
     clap_id idleTimer{0};
 
@@ -654,6 +734,7 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
     bool supressParameterChangeMessages{false};
     void audioProcessorParameterChanged(juce::AudioProcessor *, int index, float newValue) override
     {
+#if 0 // PARAM_LISTENERS_ON_MAIN_THREAD
         if (cacheHostCanUseThreadCheck)
         {
             // Parameter change messages should not be coming from the audio thread!
@@ -665,6 +746,7 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                 return;
             }
         }
+#endif
 
         // This change message came from an event that we've already handled.
         // Let's return here to avoid creating a feedback loop!
@@ -763,6 +845,10 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
                                        CLAP_BEATTIME_FACTOR);
                 posinfo.setPpqPositionOfLastBarStart(1.0 * (double)transportInfo->bar_start /
                                                      CLAP_BEATTIME_FACTOR);
+                juce::AudioPlayHead::LoopPoints loopPoints{
+                    1.0 * (double)transportInfo->loop_start_beats / CLAP_BEATTIME_FACTOR,
+                    1.0 * (double)transportInfo->loop_end_beats / CLAP_BEATTIME_FACTOR};
+                posinfo.setLoopPoints(loopPoints);
             }
             if (flags & CLAP_TRANSPORT_HAS_SECONDS_TIMELINE)
             {
@@ -895,6 +981,13 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             info->flags = 0;
         }
 
+        if (processor->supportsDoublePrecisionProcessing())
+        {
+            info->flags |= CLAP_AUDIO_PORT_SUPPORTS_64BITS;
+            info->flags |= CLAP_AUDIO_PORT_PREFERS_64BITS;
+            info->flags |= CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE;
+        }
+
         if (processor->getBus(!isInput, (int)index) != nullptr)
         {
             // this bus has a corresponding bus on the other side, so it can do in-place processing
@@ -1013,23 +1106,131 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
     bool implementsNoteName() const noexcept override
     {
+#if JUCE_VERSION < 0x080005
         if (processorAsClapExtensions)
             return processorAsClapExtensions->supportsNoteName();
-        return false;
+#endif
+
+        return true;
     }
 
-    int noteNameCount() noexcept override
+    uint32_t noteNameCount() noexcept override
     {
-        if (processorAsClapExtensions)
+        if (processorAsClapExtensions && processorAsClapExtensions->supportsNoteName())
             return processorAsClapExtensions->noteNameCount();
+
+#if JUCE_VERSION >= 0x080005
+        noteNameInfoCached.clear();
+
+        // The JUCE docs say that plugins need to be able to handle
+        // note name requests for notes above 127, but CLAP only supports
+        // notes in range [0, 127].
+        for (int key = 0; key < 128; ++key)
+        {
+            // JUCE expects MIDI channels in range [1, 16].
+            // CLAP expects MIDI channels in range [0, 15].
+            for (int channel = 0; channel < 16; ++channel)
+            {
+                const auto optionalNoteName = processor->getNameForMidiNoteNumber(key, channel + 1);
+                if (optionalNoteName.has_value())
+                    noteNameInfoCached.push_back(
+                        {*optionalNoteName, (int16_t)key, (int16_t)channel});
+            }
+        }
+
+        return static_cast<uint32_t>(noteNameInfoCached.size());
+#else
         return 0;
+#endif
     }
 
-    bool noteNameGet(int index, clap_note_name *noteName) noexcept override
+    bool noteNameGet(uint32_t index, clap_note_name *noteName) noexcept override
+    {
+        if (processorAsClapExtensions && processorAsClapExtensions->supportsNoteName())
+            return processorAsClapExtensions->noteNameGet(index, noteName);
+
+#if JUCE_VERSION >= 0x080005
+        if (index >= noteNameInfoCached.size())
+            return false;
+
+        const auto &noteNameInfo = noteNameInfoCached[index];
+        noteNameInfo.name.copyToUTF8(noteName->name, CLAP_NAME_SIZE);
+        noteName->key = noteNameInfo.key;
+        noteName->channel = noteNameInfo.channel;
+        noteName->port = -1;
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    bool implementsTrackInfo() const noexcept override { return true; }
+
+    void trackInfoChanged() noexcept override
+    {
+        clap_track_info clapTrackInfo{};
+        if (_host.trackInfoGet(&clapTrackInfo))
+        {
+            juce::AudioProcessor::TrackProperties juceTrackInfo{};
+
+            if (clapTrackInfo.flags & CLAP_TRACK_INFO_HAS_TRACK_NAME)
+            {
+                juceTrackInfo.name = juce::CharPointer_UTF8(clapTrackInfo.name);
+            }
+            if (clapTrackInfo.flags & CLAP_TRACK_INFO_HAS_TRACK_COLOR)
+            {
+                juceTrackInfo.colour = clapColourToJUCEColour(clapTrackInfo.color);
+            }
+
+            processor->updateTrackProperties(juceTrackInfo);
+        }
+    }
+
+    bool implementsParamIndication() const noexcept override
     {
         if (processorAsClapExtensions)
-            return processorAsClapExtensions->noteNameGet(index, noteName);
+            return processorAsClapExtensions->supportsParamIndication();
         return false;
+    }
+    void paramIndicationSetMapping(clap_id param_id, bool has_mapping, const clap_color_t *color,
+                                   const char *label, const char *description) noexcept override
+    {
+        if (!processorAsClapExtensions)
+            return;
+
+        const auto &param = paramPtrByClapID[param_id];
+
+        juce::Colour juceColour{};
+        if (color != nullptr)
+            juceColour = clapColourToJUCEColour(*color);
+        const juce::Colour *juceColourPtr = color == nullptr ? nullptr : &juceColour;
+
+        juce::String labelStr{};
+        if (label != nullptr)
+            labelStr = (juce::CharPointer_UTF8)label;
+
+        juce::String descStr{};
+        if (label != nullptr)
+            descStr = (juce::CharPointer_UTF8)description;
+
+        processorAsClapExtensions->paramIndicationSetMapping(*param.rangedParameter, has_mapping,
+                                                             juceColourPtr, labelStr, descStr);
+    }
+    void paramIndicationSetAutomation(clap_id param_id, uint32_t automation_state,
+                                      const clap_color_t *color) noexcept override
+    {
+        if (!processorAsClapExtensions)
+            return;
+
+        const auto &param = paramPtrByClapID[param_id];
+
+        juce::Colour juceColour{};
+        if (color != nullptr)
+            juceColour = clapColourToJUCEColour(*color);
+        const juce::Colour *juceColourPtr = color == nullptr ? nullptr : &juceColour;
+
+        processorAsClapExtensions->paramIndicationSetAutomation(*param.rangedParameter,
+                                                                automation_state, juceColourPtr);
     }
 
     bool implementRemoteControls() const noexcept override
@@ -1076,6 +1277,29 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             }
 
             return true;
+        }
+        return false;
+    }
+
+    bool implementsPresetLoad() const noexcept override
+    {
+        if (processorAsClapExtensions)
+            return processorAsClapExtensions->supportsPresetLoad();
+        return false;
+    }
+
+    bool presetLoadFromLocation(uint32_t location_kind, const char *location,
+                                const char *load_key) noexcept override
+    {
+        if (processorAsClapExtensions)
+        {
+            if (processorAsClapExtensions->presetLoadFromLocation(location_kind, location,
+                                                                  load_key))
+            {
+                if (_host.canUsePresetLoad())
+                    _host.presetLoadLoaded(location_kind, location, load_key);
+                return true;
+            }
         }
         return false;
     }
@@ -1145,8 +1369,13 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
         if (paramVariant.processorParam->isAutomatable())
             info->flags = info->flags | CLAP_PARAM_IS_AUTOMATABLE;
 
-        if (paramVariant.processorParam->isBoolean() || paramVariant.processorParam->isDiscrete())
+        if (paramVariant.processorParam->isBoolean())
         {
+            // This condition used to say || paramVariant.processorParam->isDiscrete())
+            // but AudioProcessorChoice and Int normalize to 0...1 in
+            // JUCE so this ends up breaking the built in controls
+            // at the edge in CLAP vs VST3
+
             info->flags = info->flags | CLAP_PARAM_IS_STEPPED;
         }
 
@@ -1249,21 +1478,32 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
         param.processorParam->setValue(newValue);
 
-        // we want to trigger the parameter listener callbacks on the main thread,
-        // but MessageManager::callAsync is not safe to call from the audio thread.
+#if 0 // PARAM_LISTENERS_ON_MAIN_THREAD
+      // we want to trigger the parameter listener callbacks on the main thread,
+      // but MessageManager::callAsync is not safe to call from the audio thread.
+      // This assumption though turns out to be wrong. We want to call the listener
+      // from the audio thread and leave it up to the pugin to be smart.
         audioThreadParamListenerQ.push(ParamListenerCall{param.processorParam, newValue});
         _host.requestCallback();
+#else
+        {
+            juce::ScopedValueSetter<bool> suppressCallbacks{supressParameterChangeMessages, true};
+            param.processorParam->sendValueChangedMessageToListeners(newValue);
+        }
+#endif
     }
 
     void onMainThread() noexcept override
     {
-        // handle parameter change listener callbacks
+#if 0 // PARAM_LISTENERS_ON_MAIN_THREAD
+      // handle parameter change listener callbacks
         juce::ScopedValueSetter<bool> suppressCallbacks{supressParameterChangeMessages, true};
         ParamListenerCall listenerCall{};
         while (audioThreadParamListenerQ.pop(listenerCall))
         {
             listenerCall.parameter->sendValueChangedMessageToListeners(listenerCall.newValue);
         }
+#endif
     }
 
     bool implementsLatency() const noexcept override { return true; }
@@ -1355,7 +1595,16 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
          */
         static constexpr uint32_t maxBuses = 128;
         std::array<float *, maxBuses> busses{};
+        std::array<double *, maxBuses> doubleBusses{};
         busses.fill(nullptr);
+
+        bool supportsDouble = processor->supportsDoublePrecisionProcessing();
+        bool hostCalledWithDouble = false;
+
+        if (supportsDouble)
+        {
+            doubleBusses.fill(nullptr);
+        }
 
         // we can't advance `n` until we know how many samples we're processing,
         // so we'll increment it inside the loop.
@@ -1426,7 +1675,15 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             {
                 for (uint32_t ch = 0; ch < process->audio_outputs[idx].channel_count; ++ch)
                 {
-                    busses[outputChannels] = process->audio_outputs[idx].data32[ch] + n;
+                    if (supportsDouble && process->audio_outputs[idx].data64 != nullptr)
+                    {
+                        doubleBusses[outputChannels] = process->audio_outputs[idx].data64[ch] + n;
+                        hostCalledWithDouble = true;
+                    }
+                    else
+                    {
+                        busses[outputChannels] = process->audio_outputs[idx].data32[ch] + n;
+                    }
                     outputChannels++;
                 }
             }
@@ -1437,38 +1694,81 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             {
                 for (uint32_t ch = 0; ch < process->audio_inputs[idx].channel_count; ++ch)
                 {
-                    auto *ic = process->audio_inputs[idx].data32[ch] + n;
-                    if (inputChannels < outputChannels)
+                    if (supportsDouble && process->audio_inputs[idx].data64 != nullptr)
                     {
-                        if (ic == busses[inputChannels])
+                        auto *ic = process->audio_inputs[idx].data64[ch] + n;
+                        if (inputChannels < outputChannels)
                         {
-                            // The buffers overlap - no need to do anything
+                            if (ic == doubleBusses[inputChannels])
+                            {
+                                // The buffers overlap - no need to do anything
+                            }
+                            else
+                            {
+                                juce::FloatVectorOperations::copy(doubleBusses[inputChannels], ic,
+                                                                  numSamplesToProcess);
+                            }
                         }
                         else
                         {
-                            juce::FloatVectorOperations::copy(busses[inputChannels], ic,
-                                                              numSamplesToProcess);
+                            doubleBusses[inputChannels] = ic;
                         }
+                        hostCalledWithDouble = true;
                     }
                     else
                     {
-                        busses[inputChannels] = ic;
+                        auto *ic = process->audio_inputs[idx].data32[ch] + n;
+                        if (inputChannels < outputChannels)
+                        {
+                            if (ic == busses[inputChannels])
+                            {
+                                // The buffers overlap - no need to do anything
+                            }
+                            else
+                            {
+                                juce::FloatVectorOperations::copy(busses[inputChannels], ic,
+                                                                  numSamplesToProcess);
+                            }
+                        }
+                        else
+                        {
+                            busses[inputChannels] = ic;
+                        }
                     }
                     inputChannels++;
                 }
             }
 
             auto totalChans = juce::jmax(inputChannels, outputChannels);
-            juce::AudioBuffer<float> buffer(busses.data(), (int)totalChans, numSamplesToProcess);
-
-            if (processor->isSuspended())
+            if (hostCalledWithDouble)
             {
-                buffer.clear();
+                juce::AudioBuffer<double> buffer(doubleBusses.data(), (int)totalChans,
+                                                 numSamplesToProcess);
+
+                if (processor->isSuspended())
+                {
+                    buffer.clear();
+                }
+                else
+                {
+                    FIXME("Handle bypass and deactivated states")
+                    processor->processBlock(buffer, midiBuffer);
+                }
             }
             else
             {
-                FIXME("Handle bypass and deactivated states")
-                processor->processBlock(buffer, midiBuffer);
+                juce::AudioBuffer<float> buffer(busses.data(), (int)totalChans,
+                                                numSamplesToProcess);
+
+                if (processor->isSuspended())
+                {
+                    buffer.clear();
+                }
+                else
+                {
+                    FIXME("Handle bypass and deactivated states")
+                    processor->processBlock(buffer, midiBuffer);
+                }
             }
 
             if (processorAsClapExtensions && processorAsClapExtensions->supportsOutboundEvents())
@@ -1886,7 +2186,11 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
     void guiDestroy() noexcept override
     {
-        editorWrapper.reset(nullptr);
+        if (editorWrapper)
+        {
+            juce::PopupMenu::dismissAllActiveMenus();
+            editorWrapper.reset(nullptr);
+        }
         guiParentAttached = false;
     }
 
@@ -2096,6 +2400,10 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
             return false;
         }
 
+        // On newer JUCE versions we can use chunkMemory.isEmpty(), but older JUCE didn't have that
+        if (chunkMemory.getSize() == 0)
+            return false;
+
         // JUCE has no way to report an unstream error; setStateInformation is void
         // So we just have to assume it works.
         processor->setStateInformation(chunkMemory.getData(), (int)chunkMemory.getSize());
@@ -2178,8 +2486,17 @@ class ClapJuceWrapper : public clap::helpers::Plugin<
 
     const clap_event_transport *transportInfo{nullptr};
     bool hasTransportInfo{false};
+
+    struct NoteNameInfo
+    {
+        juce::String name{};
+        int16_t key = -1;
+        int16_t channel = -1;
+    };
+    std::vector<NoteNameInfo> noteNameInfoCached{};
 };
 
+JUCE_END_IGNORE_WARNINGS_GCC_LIKE
 JUCE_END_IGNORE_WARNINGS_MSVC
 
 const char *features[] = {CLAP_FEATURES, nullptr};

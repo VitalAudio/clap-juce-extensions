@@ -41,17 +41,32 @@ juce::AudioProcessorValueTreeState::ParameterLayout NoteNamesPlugin::createParam
     return {params.begin(), params.end()};
 }
 
-int NoteNamesPlugin::noteNameCount() noexcept
-{
-    const auto noteNamesIndex = static_cast<size_t>(noteNamesParam->load());
-    return (int)noteMaps[noteNamesIndex].size();
-}
-
-bool NoteNamesPlugin::noteNameGet(int index, clap_note_name *noteName) noexcept
+#if JUCE_VERSION >= 0x080005
+std::optional<juce::String> NoteNamesPlugin::getNameForMidiNoteNumber (int noteNumber, [[maybe_unused]] int midiChannel)
 {
     const auto noteNamesIndex = static_cast<size_t>(noteNamesParam->load());
     const auto &noteMap = noteMaps[noteNamesIndex];
-    if (index < (int)noteMap.size())
+
+    for (const auto& note : noteMap)
+    {
+        if (note.key == noteNumber)
+            return note.name;
+    }
+
+    return std::nullopt;
+}
+#else
+uint32_t NoteNamesPlugin::noteNameCount() noexcept
+{
+    const auto noteNamesIndex = static_cast<size_t>(noteNamesParam->load());
+    return static_cast<uint32_t>(noteMaps[noteNamesIndex].size());
+}
+
+bool NoteNamesPlugin::noteNameGet(uint32_t index, clap_note_name *noteName) noexcept
+{
+    const auto noteNamesIndex = static_cast<size_t>(noteNamesParam->load());
+    const auto &noteMap = noteMaps[noteNamesIndex];
+    if (index < noteMap.size())
     {
         const auto &note = noteMap[(size_t)index];
         strcpy(noteName->name, note.name.getCharPointer());
@@ -63,6 +78,7 @@ bool NoteNamesPlugin::noteNameGet(int index, clap_note_name *noteName) noexcept
 
     return false;
 }
+#endif
 
 bool NoteNamesPlugin::isBusesLayoutSupported(const juce::AudioProcessor::BusesLayout &) const
 {

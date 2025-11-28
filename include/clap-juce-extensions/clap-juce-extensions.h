@@ -24,7 +24,6 @@ const clap_plugin *clap_create_plugin(const struct clap_plugin_factory *, const 
                                       const char *);
 }
 
-
 /** Forward declarations for any JUCE classes we might need. */
 namespace juce
 {
@@ -32,6 +31,7 @@ class MidiBuffer;
 class AudioProcessorParameter;
 class RangedAudioParameter;
 class String;
+class Colour;
 } // namespace juce
 
 namespace clap_juce_extensions
@@ -209,20 +209,24 @@ struct clap_juce_audio_processor_capabilities
 
     virtual bool prefersNoteDialectClap(bool isInput) { return supportsNoteDialectClap(isInput); }
 
+    // JUCE added support for note names in juce::AudioProcessor
+    // in version 8.0.5, but we still allow users to implement
+    // CLAP-style note names if they want to.
+
     /** If your plugin supports custom note names, then override this method to return true. */
-    virtual bool supportsNoteName() const noexcept { return false; }
+    [[nodiscard]] virtual bool supportsNoteName() const noexcept { return false; }
 
     /**
      * If your plugin supports custom note names, then this method should be overriden
      * to return how the number of note names that your plugin has.
      */
-    virtual int noteNameCount() noexcept { return 0; }
+    virtual uint32_t noteNameCount() noexcept { return 0; }
 
     /**
      * The host will call this method to retrieve the note name for a given index
      * in the range [0, noteNameCount()).
      */
-    virtual bool noteNameGet(int /*index*/, clap_note_name * /*noteName*/) noexcept
+    virtual bool noteNameGet(uint32_t /*index*/, clap_note_name * /*noteName*/) noexcept
     {
         return false;
     }
@@ -232,6 +236,20 @@ struct clap_juce_audio_processor_capabilities
     {
         if (noteNamesChangedSignal != nullptr)
             noteNamesChangedSignal();
+    }
+
+    virtual bool supportsParamIndication() const noexcept { return false; }
+    virtual void paramIndicationSetMapping(const juce::RangedAudioParameter & /*param*/,
+                                           bool /*has_mapping*/, const juce::Colour * /*colour*/,
+                                           const juce::String & /*label*/,
+                                           const juce::String & /*description*/) noexcept
+    {
+    }
+
+    virtual void paramIndicationSetAutomation(const juce::RangedAudioParameter & /*param*/,
+                                              uint32_t /*automation_state*/,
+                                              const juce::Colour * /*colour*/) noexcept
+    {
     }
 
     /** If your plugin supports remote controls, then override this method to return true. */
@@ -267,6 +285,41 @@ struct clap_juce_audio_processor_capabilities
             suggestRemoteControlsPageSignal(pageID);
     }
 
+    /** If your plugin supports preset load, then override this method to return true. */
+    virtual bool supportsPresetLoad() const noexcept { return false; }
+
+    /**
+     * The plugin should override this method to attempt to load a preset from a location,
+     * and return true if the load occurred successfully.
+     */
+    virtual bool presetLoadFromLocation(uint32_t /*location_kind*/, const char * /*location*/,
+                                        const char * /*load_key*/) noexcept
+    {
+        return false;
+    }
+
+    /**
+     * The plugin should call this from within presetLoadFromLocation() to report an error when
+     * trying to load the preset, and then return false from presetLoadFromLocation().
+     */
+    void reportPresetLoadError(uint32_t location_kind, const char *location, const char *load_key,
+                               int32_t os_error, const juce::String &message)
+    {
+        if (onPresetLoadError != nullptr)
+            onPresetLoadError(location_kind, location, load_key, os_error, message);
+    }
+
+    /**
+     * The plugin should call this when it has loaded a preset (whether requested from the host,
+     * or from internally within the plugin). The provided information will help the host to
+     * keep it's preset browser in-sync with the plugin.
+     */
+    void reportPresetLoaded(uint32_t location_kind, const char *location, const char *load_key)
+    {
+        if (onPresetLoaded != nullptr)
+            onPresetLoaded(location_kind, location, load_key);
+    }
+
     /*
      * If you are working with a host that chooses to not implement cookies you will
      * need to look up parameters by param_id. Use this method to do so.
@@ -294,6 +347,11 @@ struct clap_juce_audio_processor_capabilities
     std::function<void()> noteNamesChangedSignal = nullptr;
     std::function<void()> remoteControlsChangedSignal = nullptr;
     std::function<void(uint32_t)> suggestRemoteControlsPageSignal = nullptr;
+    std::function<void(uint32_t location_kind, const char *location, const char *load_key,
+                       int32_t os_error, const juce::String &msg)>
+        onPresetLoadError = nullptr;
+    std::function<void(uint32_t location_kind, const char *location, const char *load_key)>
+        onPresetLoaded = nullptr;
     std::function<const void *(const char *)> extensionGet = nullptr;
 
     friend const clap_plugin *ClapAdapter::clap_create_plugin(const struct clap_plugin_factory *,
